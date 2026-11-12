@@ -113,6 +113,12 @@ input[type=range]::-moz-range-thumb{width:20px;height:20px;border-radius:50%;bac
 .level{transition:none}
 .level.live:before,.level.live:after{opacity:.55}
 .allow{margin-top:6px;padding:10px 18px;border-radius:20px;background:var(--y);color:#000;font-weight:700}
+/* Android app: the real camera preview sits behind the page */
+html.native-cam,html.native-cam body,html.native-cam #cam{background:transparent}
+html.native-cam .vf{background:transparent;box-shadow:0 0 0 4000px #000}
+html.native-cam .top,html.native-cam .hint,html.native-cam .zooms,html.native-cam .ctrl{position:relative;z-index:3}
+.focusring{position:absolute;width:64px;height:64px;margin:-32px 0 0 -32px;border:1.5px solid var(--y);border-radius:6px;pointer-events:none;animation:fr .7s ease-out forwards}
+@keyframes fr{0%{transform:scale(1.4);opacity:0}25%{transform:scale(1);opacity:1}80%{opacity:1}100%{opacity:0}}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js" defer></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js" defer></script>
@@ -233,6 +239,7 @@ function layout(){
   const d=Math.min(devicePixelRatio||1,2.5); view.width=Math.round(vw*d); view.height=Math.round(vh*d);
   const r=RATIOS[ratioIdx]; $('ratioTxt').textContent=r[0]+':'+r[1];
   const ic=$('ratioIco'); ic.style.width=(r[0]>=r[1]?13:13*r[0]/r[1])+'px'; ic.style.height=(r[1]>=r[0]?13:13*r[1]/r[0])+'px';
+  if(typeof LIVE!=='undefined'&&LIVE.native)postPreviewRect();
   draw();
 }
 addEventListener('resize',layout);
@@ -255,9 +262,11 @@ function renderCrop(ctx,ow,oh,cr){
 function curCrop(){return cropFor(S.cx,S.cy,S.z,S.rot)}
 function draw(){
   if(!S.img){vctx.clearRect(0,0,view.width,view.height);return}
+  if(LIVE.native&&S.img===LIVE.src){vctx.clearRect(0,0,view.width,view.height);
+    if(Math.abs(S.z-LIVE.zoomSent)>.005){LIVE.zoomSent=S.z;try{ScoutNative.setZoom(S.z)}catch(e){}}return}
   renderCrop(vctx,view.width,view.height,curCrop());
 }
-function img2view(px,py){const cr=curCrop(),s=vf.clientWidth/cr.w;return [(px-cr.cx)*s+vf.clientWidth/2,(py-cr.cy)*s+vf.clientHeight/2]}
+function img2view(px,py){if(LIVE.native&&S.img===LIVE.src)return [px/S.W*vf.clientWidth,py/S.H*vf.clientHeight];const cr=curCrop(),s=vf.clientWidth/cr.w;return [(px-cr.cx)*s+vf.clientWidth/2,(py-cr.cy)*s+vf.clientHeight/2]}
 
 /* ---------- zoom chips ---------- */
 function zoomList(){const L=[1,2,3];if(S.aiZoom&&!L.some(v=>Math.abs(v-S.aiZoom)<.05))L.push(S.aiZoom);return L.sort((a,b)=>a-b)}
@@ -282,15 +291,22 @@ function animateTo(tg,ms=700){
 
 /* ---------- drag to re-frame, pinch to zoom ---------- */
 const ptrs=new Map(); let pinch0=null;
-vf.addEventListener('pointerdown',e=>{if(!S.img||S.phase==='scanning')return;vf.setPointerCapture(e.pointerId);ptrs.set(e.pointerId,[e.clientX,e.clientY]);animId++;
+let tapInfo=null;
+vf.addEventListener('pointerdown',e=>{tapInfo={x:e.clientX,y:e.clientY,t:performance.now(),moved:false};if(!S.img||S.phase==='scanning')return;vf.setPointerCapture(e.pointerId);ptrs.set(e.pointerId,[e.clientX,e.clientY]);animId++;
   if(ptrs.size===2){const[a,b]=[...ptrs.values()];pinch0={d:Math.hypot(a[0]-b[0],a[1]-b[1]),z:S.z}}});
-vf.addEventListener('pointermove',e=>{if(!ptrs.has(e.pointerId))return;const p=ptrs.get(e.pointerId);
+vf.addEventListener('pointermove',e=>{if(tapInfo&&Math.hypot(e.clientX-tapInfo.x,e.clientY-tapInfo.y)>10)tapInfo.moved=true;if(!ptrs.has(e.pointerId))return;const p=ptrs.get(e.pointerId);
+  if(LIVE.native&&S.img===LIVE.src&&ptrs.size===1){ptrs.set(e.pointerId,[e.clientX,e.clientY]);return}
   if(ptrs.size===1){const cr=curCrop(),s=vf.clientWidth/cr.w,dx=(e.clientX-p[0])/s,dy=(e.clientY-p[1])/s,t=-S.rot*Math.PI/180;
     S.cx-=dx*Math.cos(t)-dy*Math.sin(t);S.cy-=dx*Math.sin(t)+dy*Math.cos(t);}
   ptrs.set(e.pointerId,[e.clientX,e.clientY]);
   if(ptrs.size===2&&pinch0){const[a,b]=[...ptrs.values()];S.z=clamp(pinch0.z*Math.hypot(a[0]-b[0],a[1]-b[1])/pinch0.d,1,6)}
   const c=curCrop();S.cx=c.cx;S.cy=c.cy;draw();placeOverlays();});
-const up=e=>{ptrs.delete(e.pointerId);if(ptrs.size<2)pinch0=null;renderZooms()};
+const up=e=>{ptrs.delete(e.pointerId);if(ptrs.size<2)pinch0=null;renderZooms();
+  if(e.type==='pointerup'&&tapInfo&&!tapInfo.moved&&performance.now()-tapInfo.t<350&&LIVE.native&&S.img===LIVE.src){
+    const r=vf.getBoundingClientRect(),x=e.clientX-r.left,y=e.clientY-r.top;
+    try{ScoutNative.focus(x/r.width,y/r.height)}catch(err){}
+    const f=document.createElement('div');f.className='focusring';f.style.left=x+'px';f.style.top=y+'px';vf.appendChild(f);setTimeout(()=>f.remove(),800);}
+  tapInfo=null};
 vf.addEventListener('pointerup',up);vf.addEventListener('pointercancel',up);
 
 /* ---------- overlays & phase UI ---------- */
@@ -304,13 +320,13 @@ function setPhase(p){
   $('empty').classList.toggle('hidden',has);
   $('scanfx').classList.toggle('hidden',p!=='scanning');
   $('box').classList.toggle('hidden',p!=='found');
-  $('level').classList.toggle('hidden',!(p==='ready'||p==='zooming'||(p==='idle'&&LIVE.on&&S.img===vid&&LIVE.motion)));
+  $('level').classList.toggle('hidden',!(p==='ready'||p==='zooming'||(p==='idle'&&LIVE.on&&S.img===LIVE.src&&LIVE.motion)));
   $('pill').classList.toggle('hidden',!(S.scan&&(p==='found'||p==='zooming'||p==='ready')));
   $('pillRd').classList.toggle('hidden',p!=='ready');
-  $('shutter').classList.toggle('ready',p==='ready'||(has&&p==='idle'&&S.img!==vid));
+  $('shutter').classList.toggle('ready',p==='ready'||(has&&p==='idle'&&S.img!==LIVE.src));
   const hint=$('hint'); hint.className='hint';
   if(!has) hint.textContent='Tap the shutter to take a photo';
-  else if(p==='idle'){hint.innerHTML=(S.img===vid?'Tap <span style="color:var(--y)">✦</span> to scan a new scene':'Tap <span style="color:var(--y)">✦</span> to scan the scene · shutter to edit')}
+  else if(p==='idle'){hint.innerHTML=(S.img===LIVE.src?'Tap <span style="color:var(--y)">✦</span> to scan a new scene':'Tap <span style="color:var(--y)">✦</span> to scan the scene · shutter to edit')}
   else if(p==='scanning'){hint.textContent='Finding your shot…';hint.classList.add('on')}
   else if(S.scan){hint.textContent=S.scan.tip;hint.classList.add('tip')}
   const sb=$('sideBtn'); sb.className='side';
@@ -343,16 +359,25 @@ $('galIn').onchange=e=>{loadFile(e.target.files[0]);e.target.value=''};
 $('shutter').addEventListener('click',e=>{
   if(isLive()){ e.preventDefault(); if(S.phase==='scanning'||S.phase==='found')return; captureLive(); return }
   if(!S.img||S.phase==='scanning') return; e.preventDefault(); openEditor(); });
-$('newBtn').addEventListener('click',e=>{ if(LIVE.on&&S.img&&S.img!==vid){ e.preventDefault(); resumeLive(); } });
+$('newBtn').addEventListener('click',e=>{ if(LIVE.on&&S.img&&S.img!==LIVE.src){ e.preventDefault(); resumeLive(); } });
 $('galBtn').addEventListener('click',e=>{ if(lastShot){ e.preventDefault(); editShot(lastShot); } });
-function editShot(sh){ stopTracking(); Object.assign(S,{img:sh.img,W:sh.W,H:sh.H,cx:sh.cx,cy:sh.cy,z:sh.z,rot:sh.rot,exif:sh.exif}); openEditor(); }
+async function editShot(sh){ stopTracking();
+  if(sh.uri){
+    let b='';try{b=ScoutNative.readImage(sh.uri)}catch(e){}
+    if(!b){toast('That photo is no longer in the Gallery');lastShot=null;$('galBtn').style.backgroundImage='';return}
+    const bin=atob(b),bytes=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
+    let exif={};try{exif=readExif(bytes.buffer.slice(0,262144))}catch(e){}
+    const bmp=await createImageBitmap(new Blob([bytes],{type:'image/jpeg'}),{imageOrientation:'from-image'});
+    Object.assign(S,{img:bmp,W:bmp.width,H:bmp.height,cx:bmp.width/2,cy:bmp.height/2,z:1,rot:0,exif});
+    openEditor();return;
+  } Object.assign(S,{img:sh.img,W:sh.W,H:sh.H,cx:sh.cx,cy:sh.cy,z:sh.z,rot:sh.rot,exif:sh.exif}); openEditor(); }
 const CAM_ICO='<path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/>', GAL_ICO='<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-9 9"/>';
-function syncTopBtn(){ $('newIco').innerHTML=(LIVE.on&&S.img&&S.img!==vid)?CAM_ICO:GAL_ICO }
+function syncTopBtn(){ $('newIco').innerHTML=(LIVE.on&&S.img&&S.img!==LIVE.src)?CAM_ICO:GAL_ICO }
 /* hardware back button (Android app) */
 window.scoutBack=function(){
   if(!$('saveSheet').classList.contains('hidden')){$('saveSheet').classList.add('hidden');return true}
   if(!$('ed').classList.contains('hidden')){closeEditor();return true}
-  if(LIVE.on&&S.img&&S.img!==vid){resumeLive();return true}
+  if(LIVE.on&&S.img&&S.img!==LIVE.src){resumeLive();return true}
   if(S.phase==='ready'||S.phase==='found'||S.phase==='zooming'){$('sideBtn').click();return true}
   return false;
 };
@@ -377,6 +402,7 @@ function spawnDots(){const d=$('dots');d.innerHTML='';for(let i=0;i<14;i++){cons
 async function scan(){
   if(!S.img)return;
   setPhase('scanning'); spawnDots();
+  if(LIVE.native&&S.img===LIVE.src){for(let i=0;i<6&&!(await grabFrame());i++)await new Promise(r=>setTimeout(r,250))}
   abortCtl=new AbortController(); const sig=abortCtl.signal;
   const t0=performance.now();
   let res=null;
@@ -393,6 +419,11 @@ async function scan(){
   frameSubject(false);
 }
 function framingFor(b,zFixed){
+  if(LIVE.native&&S.img===LIVE.src){
+    const frac=Math.max(b[2],b[3]);
+    const z=zFixed||clamp(Math.round(10*S.z*0.5/Math.max(frac,.05))/10,1,Math.min(LIVE.maxZoom,6));
+    return {cx:S.W/2,cy:S.H/2,z};
+  }
   const bw=b[2]*S.W, bh=b[3]*S.H, base=baseRect();
   const frac=Math.max(bw/base.w,bh/base.h);
   const z=zFixed||clamp(Math.round(10*0.5/Math.max(frac,.05))/10,1,isLive()?3:4);
@@ -655,9 +686,38 @@ $('sheetClose').onclick=()=>$('saveSheet').classList.add('hidden');
    LIVE CAMERA
    ====================================================== */
 const vid=$('vid');
-const LIVE={on:false,stream:null,track:null,roll:0,motion:false,tracking:null,target:null,busy:false};
-function isLive(){return LIVE.on&&S.img===vid}
+const LIVE={on:false,stream:null,track:null,roll:0,motion:false,tracking:null,target:null,busy:false,src:vid,native:false,zoomSent:1,maxZoom:8,capturing:false};
+const NF=document.createElement('canvas');NF.width=480;NF.height=640;
+function isLive(){return LIVE.on&&S.img===LIVE.src}
+function postPreviewRect(){const r=vf.getBoundingClientRect();try{ScoutNative.setPreviewRect(r.left,r.top,r.width,r.height)}catch(e){}}
+async function grabFrame(){
+  let b='';try{b=ScoutNative.grabFrame()}catch(e){}
+  if(!b)return false;
+  const im=new Image();await new Promise(r=>{im.onload=r;im.onerror=r;im.src='data:image/jpeg;base64,'+b});
+  if(!im.width)return false;
+  if(NF.width!==im.width||NF.height!==im.height){NF.width=im.width;NF.height=im.height}
+  NF.getContext('2d').drawImage(im,0,0);
+  if(S.img===NF){S.W=NF.width;S.H=NF.height}
+  return true;
+}
+function startNative(){
+  LIVE.native=true;LIVE.src=NF;document.documentElement.classList.add('native-cam');
+  const x=NF.getContext('2d');x.fillStyle='#222';x.fillRect(0,0,NF.width,NF.height);
+  $('help').textContent='Starting camera…';
+  layout();
+  try{ScoutNative.startCamera()}catch(e){noLive('Camera could not start.',true)}
+  return true;
+}
+window.scoutCameraReady=function(maxZoom){
+  LIVE.maxZoom=maxZoom||8;LIVE.zoomSent=-1;
+  if(!LIVE.on){LIVE.on=true;$('allowBtn').classList.add('hidden');resumeLive();loadDetector();requestAnimationFrame(liveLoop);
+    setInterval(()=>{if(isLive()&&!$('cam').classList.contains('hidden')&&(S.phase==='idle'||S.phase==='ready'))grabFrame()},900);
+    setTimeout(grabFrame,600);}
+  else{postPreviewRect()}
+};
+window.scoutCameraError=function(msg){noLive(msg||'Camera could not start.',true)};
 async function startLive(){
+  if(window.ScoutNative&&window.ScoutNative.startCamera)return startNative();
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){noLive('This browser can\'t show a live camera here. Tap the shutter to use your camera app.');return false}
   try{
     LIVE.stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:3264},height:{ideal:2448}}});
@@ -673,13 +733,13 @@ function noLive(msg,canRetry){LIVE.on=false;$('help').textContent=msg;$('allowBt
 $('allowBtn').onclick=e=>{e.preventDefault();startLive()};
 function resumeLive(){
   if(!LIVE.on)return;
-  S.img=vid;S.W=vid.videoWidth||1080;S.H=vid.videoHeight||1440;S.cx=S.W/2;S.cy=S.H/2;S.z=1;S.rot=0;S.scan=null;S.aiZoom=null;S.exif={};
+  S.img=LIVE.src;S.W=LIVE.native?NF.width:(vid.videoWidth||1080);S.H=LIVE.native?NF.height:(vid.videoHeight||1440);S.cx=S.W/2;S.cy=S.H/2;S.z=1;S.rot=0;S.scan=null;S.aiZoom=null;S.exif={};
   stopTracking(); layout(); setPhase('idle');
 }
 function liveLoop(){
   if(LIVE.on){
-    if(S.img===vid&&!$('cam').classList.contains('hidden')){
-      if(vid.videoWidth&&(vid.videoWidth!==S.W||vid.videoHeight!==S.H)){S.W=vid.videoWidth;S.H=vid.videoHeight}
+    if(S.img===LIVE.src&&!$('cam').classList.contains('hidden')){
+      if(!LIVE.native&&vid.videoWidth&&(vid.videoWidth!==S.W||vid.videoHeight!==S.H)){S.W=vid.videoWidth;S.H=vid.videoHeight}
       if(LIVE.target&&!ptrs.size&&S.phase==='ready'){S.cx+=(LIVE.target.cx-S.cx)*.08;S.cy+=(LIVE.target.cy-S.cy)*.08;const c=curCrop();S.cx=c.cx;S.cy=c.cy}
       draw(); placeOverlays(); updateLevel();
     }
@@ -762,7 +822,7 @@ async function detectScan(){
 /* keep the subject framed while the phone moves */
 function stopTracking(){clearInterval(LIVE.tracking);LIVE.tracking=null;LIVE.target=null}
 function startTracking(){
-  stopTracking(); if(!isLive()||!S.scan||!S.scan.raw)return;
+  stopTracking(); if(!isLive()||LIVE.native||!S.scan||!S.scan.raw)return;
   LIVE.target={cx:S.cx,cy:S.cy};
   LIVE.tracking=setInterval(async()=>{
     if(LIVE.busy||S.phase!=='ready'||!isLive())return; LIVE.busy=true;
@@ -802,7 +862,22 @@ function matchOrientation(bmp,frame){
   if(best===null)return null;
   return rotCanvas(bmp,best);
 }
+async function captureNative(){
+  if(LIVE.capturing)return; LIVE.capturing=true;
+  const fl=$('flash');fl.classList.remove('go');void fl.offsetWidth;fl.classList.add('go');
+  try{ScoutNative.haptic()}catch(e){}
+  const res=await new Promise(r=>{const t=setTimeout(()=>r({ok:false,msg:'timed out'}),20000);
+    window.scoutSaved=(ok,uri,w,h,thumb,msg)=>{clearTimeout(t);r({ok,uri,w,h,thumb,msg})};
+    try{ScoutNative.takePicture(shotName())}catch(e){clearTimeout(t);r({ok:false,msg:String(e)})}});
+  LIVE.capturing=false;
+  if(res.ok){
+    toast('Saved to Gallery · '+(res.w*res.h/1e6).toFixed(1)+' MP');
+    if(res.thumb){$('galBtn').style.backgroundImage='url(data:image/jpeg;base64,'+res.thumb+')';$('galBtn').innerHTML=''}
+    lastShot={uri:res.uri};
+  }else toast('Could not save: '+(res.msg||'unknown error'),3500);
+}
 async function captureLive(){
+  if(LIVE.native)return captureNative();
   const fl=$('flash');fl.classList.remove('go');void fl.offsetWidth;fl.classList.add('go');
   stopTracking();
   const vw=S.W,vh=S.H,st={cx:S.cx,cy:S.cy,z:S.z,rot:S.rot};
