@@ -490,7 +490,7 @@ const LOOKS=[
  {id:'velvet',name:'VELVET',p:{sat:.32,con:.22,tint:.06,exp:-.06}},
  {id:'mono',name:'MONO',p:{bw:1,fade:.16,con:-.04,grain:.12}},
 ];
-const ADJ=[['exp','Exposure',-1,1],['con','Contrast',-1,1],['sat','Saturation',-1,1],['warm','Warmth',-1,1],['tint','Tint',-1,1],['fade','Fade',0,1],['grain','Grain',0,1],['vig','Vignette',0,1]];
+const ADJ=[['exp','Exposure',-1,1],['con','Contrast',-1,1],['sat','Saturation',-1,1],['warm','Warmth',-1,1],['tint','Tint',-1,1],['fade','Fade',0,1],['grain','Grain',0,1],['vig','Vignette',0,1],['sharp','Sharpen',0,1]];
 const EFFECTS=[['grain','Film grain'],['vig','Vignette'],['leak','Light leak'],['glow','Soft glow'],['date','Date stamp']];
 const FRAMES=[['none','None'],['white','White'],['thin','Thin'],['black','Black'],['film','Film']];
 let E=null, hist=[], hpos=-1, base=null, baseSmall=null, renderTok=0;
@@ -564,7 +564,14 @@ function frame(c,e){
     const line=exifLine()||new Date().toLocaleDateString();x.textAlign='center';x.globalAlpha=.55;x.font='400 '+Math.round(fs*.72)+'px -apple-system,Roboto,Arial,sans-serif';x.fillText(line,o.width/2,cy+fs*.75);x.globalAlpha=1}
   return o;
 }
-function pipeline(src,e,gScale){const P=lookParams(e);return frame(effects(grade(src,P,gScale),P,e),e)}
+function sharpen(c,amt){
+  if(!(amt>0))return c;
+  const x=c.getContext('2d'),w=c.width,h=c.height,id=x.getImageData(0,0,w,h),d=id.data,o=new Uint8ClampedArray(d),k=amt*1.6;
+  for(let y=1;y<h-1;y++){let i=(y*w+1)*4;for(let X=1;X<w-1;X++,i+=4){for(let ch=0;ch<3;ch++){const j=i+ch,cv=o[j];
+    const lap=4*cv-o[j-4]-o[j+4]-o[j-w*4]-o[j+w*4];d[j]=cv+lap*k*.5}}}
+  x.putImageData(id,0,0);return c;
+}
+function pipeline(src,e,gScale){const P=lookParams(e);return frame(effects(sharpen(grade(src,P,gScale),e.adj.sharp||0),P,e),e)}
 
 let compare=false;
 function render(){
@@ -653,7 +660,7 @@ function isLive(){return LIVE.on&&S.img===vid}
 async function startLive(){
   if(!navigator.mediaDevices||!navigator.mediaDevices.getUserMedia){noLive('This browser can\'t show a live camera here. Tap the shutter to use your camera app.');return false}
   try{
-    LIVE.stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1920},height:{ideal:1440}}});
+    LIVE.stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:3264},height:{ideal:2448}}});
   }catch(e){
     noLive(e&&e.name==='NotAllowedError'?'Camera access is blocked. Allow it for this site, or tap the shutter to use your camera app.':'Live camera isn\'t available here. Tap the shutter to use your camera app.',e&&e.name==='NotAllowedError');return false}
   LIVE.track=LIVE.stream.getVideoTracks()[0];
@@ -769,6 +776,32 @@ function startTracking(){
   },700);
 }
 /* capture a full-resolution still */
+/* Turn the full-res photo so it matches what the viewfinder showed (some phones return it sideways). */
+function rotCanvas(src,deg){
+  if(!deg)return src;
+  const c=document.createElement('canvas'),q=deg%180!==0;c.width=q?src.height:src.width;c.height=q?src.width:src.height;
+  const x=c.getContext('2d');x.translate(c.width/2,c.height/2);x.rotate(deg*Math.PI/180);x.drawImage(src,-src.width/2,-src.height/2);return c;
+}
+function tinyGray(src,w,h){
+  const c=document.createElement('canvas');c.width=w;c.height=h;const x=c.getContext('2d');x.drawImage(src,0,0,w,h);
+  const d=x.getImageData(0,0,w,h).data,g=new Float32Array(w*h);let m=0;
+  for(let i=0;i<g.length;i++){g[i]=.3*d[i*4]+.59*d[i*4+1]+.11*d[i*4+2];m+=g[i]}m/=g.length;
+  let v=0;for(let i=0;i<g.length;i++){g[i]-=m;v+=g[i]*g[i]}v=Math.sqrt(v/g.length)||1;for(let i=0;i<g.length;i++)g[i]/=v;return g;
+}
+function matchOrientation(bmp,frame){
+  const fa=frame.width/frame.height,W=24,H=Math.max(8,Math.round(24/fa)),ref=tinyGray(frame,W,H);
+  let best=null,bs=1e9;
+  for(const deg of [0,90,270,180]){
+    const q=deg%180!==0,a=q?bmp.height/bmp.width:bmp.width/bmp.height;
+    if(Math.abs(a-fa)>.08)continue;
+    // compare on a small copy first (fast), rotate the full image only for the winner
+    const small=document.createElement('canvas');small.width=q?H*2:W*2;small.height=q?W*2:H*2;small.getContext('2d').drawImage(bmp,0,0,small.width,small.height);
+    const g=tinyGray(rotCanvas(small,deg),W,H);let e=0;for(let i=0;i<g.length;i++)e+=Math.abs(g[i]-ref[i]);
+    if(e<bs){bs=e;best=deg}
+  }
+  if(best===null)return null;
+  return rotCanvas(bmp,best);
+}
 async function captureLive(){
   const fl=$('flash');fl.classList.remove('go');void fl.offsetWidth;fl.classList.add('go');
   stopTracking();
@@ -779,10 +812,15 @@ async function captureLive(){
   $('hint').textContent='Capturing…';
   try{
     if('ImageCapture' in window&&LIVE.track){
-      const blob=await Promise.race([new ImageCapture(LIVE.track).takePhoto(),new Promise((_,j)=>setTimeout(()=>j(0),4000))]);
+      const ic=new ImageCapture(LIVE.track);
+      // ask the camera for its largest photo size
+      let ps={};
+      try{const pc=await ic.getPhotoCapabilities();if(pc&&pc.imageWidth&&pc.imageWidth.max)ps={imageWidth:pc.imageWidth.max,imageHeight:pc.imageHeight.max}}catch(e){}
+      const blob=await Promise.race([ic.takePhoto(ps).catch(()=>ic.takePhoto()),new Promise((_,j)=>setTimeout(()=>j(0),5000))]);
       try{exif=readExif(await blob.slice(0,262144).arrayBuffer())}catch(e){}
       const bmp=await createImageBitmap(blob,{imageOrientation:'from-image'});
-      if(Math.abs(bmp.width/bmp.height-vw/vh)<.03&&bmp.width>vw)still=bmp;
+      const fixed=matchOrientation(bmp,fr);
+      if(fixed&&fixed.width*fixed.height>vw*vh*1.2)still=fixed;
       if(LIVE.track.readyState!=='live'){LIVE.on=false;startLive()}
     }
   }catch(e){}
@@ -798,7 +836,7 @@ async function captureLive(){
   $('galBtn').style.backgroundImage='url('+thumbURL(full,120)+')';$('galBtn').innerHTML='';
   lastShot=shot;
   const blob=await new Promise(r=>full.toBlob(r,'image/jpeg',.94));
-  if(await nativeSave(blob,shotName())) toast('Saved to Gallery');
+  if(await nativeSave(blob,shotName())) toast('Saved to Gallery · '+(full.width*full.height/1e6).toFixed(1)+' MP');
 }
 
 /* installable web app: offline support (not needed inside the Android app) */
