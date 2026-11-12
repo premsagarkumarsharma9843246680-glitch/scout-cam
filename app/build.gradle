@@ -1,0 +1,45 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.premsagar.scoutcam'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'com.premsagar.scoutcam'
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+    }
+
+    // Fixed signing key kept in the repo, so new versions install over old ones.
+    signingConfigs {
+        scout {
+            storeFile file('scoutcam.keystore')
+            storePassword 'scoutcam'
+            keyAlias 'scoutcam'
+            keyPassword 'scoutcam'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.scout
+        }
+        debug {
+            signingConfig signingConfigs.scout
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.11.0'
+}
